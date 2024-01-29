@@ -19,3 +19,36 @@ With bigdelete I am following this approach:
 
 I needed the operation to be totally online, just as if someone would have deleted the records
 - Note that the list of ROWIDs could be generated on the fly (maybe with a script calling sqlplus) and then have this output piped to bigdelete. However this will likely be a problem because the cursor used to extract the ROWIDs will still be open when data will start to be deleted, and this will be very slow because of the UNDO needed for keeping this cursor consistent and for the delete itself.
+
+Version history information:
+
+version 1:
+	delete from table where rowid in (a,b,c...), max 1000
+
+	executed in N sessions
+
+	SQLs are not reused - lots of hard parses
+
+version 2:
+	prepare insert statement
+
+	truncate table bigdeletetemp - if not temp table with delete on commit
+	insert into bigdeletetemp values (a)
+	insert into bigdeletetemp values (b)
+	insert into bigdeletetemp values (c)
+	...
+	commit (?)
+	start transaction
+	delete from table where rowid in (select rid from bigdeletetemp)
+	commit transaction
+
+	executed in N sessions
+
+	SQLs are reused
+
+	bigdeletetemp table is hardcoded - it can be a synonym to any table with the structure:
+drop table bigdeletetemp;
+create global temporary table bigdeletetemp (rid rowid) on commit delete rows;
+
+DB transactions in Go:		
+https://go.dev/doc/database/execute-transactions
