@@ -1,0 +1,9 @@
+tag..  cksum........................... target...........................................
+v0.0.1 63508647 18265832 bigdelete
+v0.0.4 1376029260 18265328 bigdelete    panynj cthdb21 bufferdb
+v0.0.5 1960079392 18265288 bigdelete    ncta db2 bufferdb
+v0.0.5 1960079392 18265288 bigdelete    ncta db1 data archive
+v0.0.6 1015308018 18265272 bigdelete    panynj cthdb21 bufferdb, ncta db2 bufferdb
+v0.0.7 358229278  18265376 bigdelete    ncta db1 data archive
+v0.0.7 358229278  18265376 bigdelete    panynj cthdb21 bufferdb
+v0.0.8 2683110643 18270416 bigdelete    panynj cthdb21 bufferdb
