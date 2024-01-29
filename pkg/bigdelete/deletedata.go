@@ -1,4 +1,4 @@
-package main
+package bigdelete
 
 // temp table:
 // create global temporary table romsrep.tempdelete (rid rowid) on delete delete rows;

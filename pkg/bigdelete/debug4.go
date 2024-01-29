@@ -1,10 +1,11 @@
-package main
+package bigdelete
 
 import (
 	"context"
 	"log"
 	"os"
 	"time"
+	// _ "github.com/godror/godror"
 )
 
 // does not work
