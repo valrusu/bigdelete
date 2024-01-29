@@ -1,0 +1,10 @@
+506,509c506,509
+< 	// if c.params.Timezone != nil && c.params.Timezone != time.Local {
+< 	c.tzValid = true
+< 	return nil
+< 	// }
+---
+> 	if c.params.Timezone != nil && c.params.Timezone != time.Local {
+> 		c.tzValid = true
+> 		return nil
+> 	}
