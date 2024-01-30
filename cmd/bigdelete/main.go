@@ -7,7 +7,7 @@ package main
 import (
 	"flag"
 	"log"
-	_ "github.com/godror/godror"
+
 	// github.com/valrusu/bigdelete/pkg
 	"github.com/valrusu/bigdelete"
 )
