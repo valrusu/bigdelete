@@ -27,7 +27,7 @@ func deletedata(threadnbr int, ch chan string, chok chan count, db *sql.DB, wg *
 		tx      *sql.Tx
 	)
 
-	if debugFlag {
+	if DebugFlag {
 		log.Println("thread", threadnbr, "get connection")
 	}
 
@@ -35,11 +35,11 @@ func deletedata(threadnbr int, ch chan string, chok chan count, db *sql.DB, wg *
 	stopOnError(err, "", 7)
 	defer stmtIns.Close()
 
-	if debugFlag {
+	if DebugFlag {
 		log.Println("thread", threadnbr, "prepare delete stmt at conn level")
 	}
 
-	stmtDel, err := db.Prepare("delete from " + tableName + " where rowid in (select rid from bigdeletetemp)")
+	stmtDel, err := db.Prepare("delete from " + TableName + " where rowid in (select rid from bigdeletetemp)")
 	stopOnError(err, "", 6)
 	defer stmtDel.Close()
 
@@ -52,24 +52,24 @@ func deletedata(threadnbr int, ch chan string, chok chan count, db *sql.DB, wg *
 
 	for rid := range ch {
 
-		if debugFlag {
+		if DebugFlag {
 			log.Println("thread", threadnbr, "read rid", rid)
 		}
 
 		_, err := stmtInsTx.Exec(rid)
-		if err != nil && debugFlag {
+		if err != nil && DebugFlag {
 			log.Println("insert received error", rid, err)
 		}
 		stopOnError(err, "failed to insert into temp table bigdeletetemp "+rid, 9)
 
 		totrows++
 		crtrows++
-		if debugFlag {
+		if DebugFlag {
 			log.Println("thread", threadnbr, "total", totrows, "crt", crtrows)
 		}
 
-		if crtrows == rowidspercall {
-			if debugFlag {
+		if crtrows == Rowidspercall {
+			if DebugFlag {
 				log.Println("thread", threadnbr, "running delete")
 			}
 
@@ -80,14 +80,14 @@ func deletedata(threadnbr int, ch chan string, chok chan count, db *sql.DB, wg *
 
 			rowsdeleted, err := ret.RowsAffected()
 			stopOnError(err, "failed to get number of rows affected", 15)
-			if debugFlag {
+			if DebugFlag {
 				log.Println("rows deleted", rowsdeleted)
 			}
 
-			if debugFlag {
+			if DebugFlag {
 				log.Println("thread", threadnbr, "commit")
 			}
-			// if debugFlag {
+			// if DebugFlag {
 			// log.Println("thread", threadnbr, "before commit, sleep")
 			// time.Sleep(5 * time.Second)
 			// }
@@ -107,7 +107,7 @@ func deletedata(threadnbr int, ch chan string, chok chan count, db *sql.DB, wg *
 
 	// read all the input rows and we have some left not committed
 	if crtrows != 0 {
-		if debugFlag {
+		if DebugFlag {
 			log.Println("thread", threadnbr, "running final delete")
 		}
 
@@ -115,7 +115,7 @@ func deletedata(threadnbr int, ch chan string, chok chan count, db *sql.DB, wg *
 		stopOnError(err, "failed to delete", 13)
 
 		rowsdeleted, err := ret.RowsAffected()
-		if debugFlag {
+		if DebugFlag {
 			log.Println("thread", threadnbr, "rows deleted", rowsdeleted)
 		}
 

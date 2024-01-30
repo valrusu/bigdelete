@@ -20,11 +20,11 @@ func countreader(ch chan count, wg *sync.WaitGroup) {
 		totaldelete += del.countdelete
 		//	if totaldeleted >= lastreported+interval {
 		//log.Println("table", tableName, "thread", del.deleter, "deleted", totaldeleted)
-		log.Println(tableName, totaltarget, totaldelete, "[", del.deleter, "]", del.counttarget, del.countdelete)
+		log.Println(TableName, totaltarget, totaldelete, "[", del.deleter, "]", del.counttarget, del.countdelete)
 		// lastreported = totaldeleted
 		//	}
 	}
 
-	fmt.Println(tableName, totaltarget, totaldelete)
+	fmt.Println(TableName, totaltarget, totaldelete)
 	wg.Done()
 }
