@@ -503,10 +503,10 @@ func (c *conn) initTZ() error {
 		return nil
 	}
 	noTZCheck := c.params.NoTZCheck || c.params.Timezone != nil
-	// if c.params.Timezone != nil && c.params.Timezone != time.Local {
-	c.tzValid = true
-	return nil
-	// }
+	if c.params.Timezone != nil && c.params.Timezone != time.Local {
+		c.tzValid = true
+		return nil
+	}
 	c.params.Timezone = time.Local
 
 	key := time.Local.String() + "\t" + c.params.ConnectString
