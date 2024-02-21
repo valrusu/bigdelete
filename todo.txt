@@ -1,0 +1,7 @@
+- fail nicer if the delete fails (maybe due to a FK constraint); current it just crashes
+- add tnsadmin parameter
+    - full path
+    or 
+    - same directory as the executable with "."
+    - see dataarchive
+    - make dataarchive pass it to bigdelete
