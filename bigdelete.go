@@ -3,6 +3,7 @@ package bigdelete
 import (
 	"bufio"
 	"database/sql"
+	"fmt"
 	"log"
 	"os"
 	"sync"
@@ -10,12 +11,12 @@ import (
 )
 
 var (
-	ConnStr, TableName string
-	Numthreads         int
-	Rowidspercall      int
-	DebugFlag          bool
-	db                 *sql.DB
-	err                error
+	ConnStr, TableName, Tnsadmin string
+	Numthreads                   int
+	Rowidspercall                int
+	DebugFlag                    bool
+	db                           *sql.DB
+	err                          error
 )
 
 type count struct {
@@ -24,19 +25,29 @@ type count struct {
 	countdelete int
 }
 
-func BigDelete() {
+type Progerr struct {
+	Err  error
+	Msg  string
+	Code int
+}
+
+func BigDelete() Progerr {
 	db, err = sql.Open("godror", ConnStr)
-	stopOnError(err, "cannot connect to database", 1)
+	if err != nil {
+		return Progerr{err, "cannot connect to database", 1}
+	}
 	defer db.Close()
 	if DebugFlag {
-		log.Println("connected, sleep")
+		log.Println("connecteds [ 5s ]")
 		time.Sleep(5 * time.Second)
 	}
 
 	err = db.Ping()
-	stopOnError(err, "cannot ping db", 1)
+	if err != nil {
+		return Progerr{err, "cannot ping db", 2}
+	}
 	if DebugFlag {
-		log.Println("sleep after ping")
+		log.Println("sleep after ping [ 20s ]")
 		time.Sleep(20 * time.Second)
 	}
 
@@ -55,7 +66,9 @@ select 'sid'           , sys_context('userenv','sid'           ) from dual union
 select 'terminal'      , sys_context('userenv','terminal'      ) from dual union all
 select '======','======' from dual`
 		rows, err := db.Query(input)
-		stopOnError(err, "get db info failed", 1)
+		if err != nil {
+			return Progerr{err, "get db info failed", 3}
+		}
 
 		var s1, s2 string
 		for rows.Next() {
@@ -90,4 +103,205 @@ select '======','======' from dual`
 	wgdata.Wait()
 	close(chcnt)
 	wgcnt.Wait()
+
+	return Progerr{nil, "", 0}
+}
+
+// func stopOnError(err error, msg string, errcode int) {
+// 	if err != nil {
+// 		if msg != "" {
+// 			log.Println(msg)
+// 		}
+// 		log.Println(err)
+// 		os.Exit(errcode)
+// 	}
+// }
+
+// piperowids reads ROWIDs from stdin and pushes them in the ch channel for fanning out
+func piperowids(in *bufio.Scanner, ch chan string) {
+	cnt := 0
+	for in.Scan() {
+		ch <- in.Text()
+		cnt++
+	}
+	close(ch)
+}
+
+// deletedata reads ROWIDs from the ch channel, inserts them in the temp table and then deletes them from the target table
+func deletedata(threadnbr int, ch chan string, chok chan count, db *sql.DB, wg *sync.WaitGroup) {
+	// read N
+	// build a block
+	// call DB
+	// some report
+	// push failures back in the channel ?!?
+	//i := 0
+
+	var (
+		totrows int
+		crtrows int
+		tx      *sql.Tx
+	)
+
+	if DebugFlag {
+		log.Println("thread", threadnbr, "get connection")
+	}
+
+	stmtIns, err := db.Prepare("insert into bigdeletetemp values (:rid)")
+	if err != nil {
+		// TODO a better way to stop on errors
+		log.Println("failed to prepare statement", err)
+		os.Exit(7)
+	}
+	defer stmtIns.Close()
+
+	if DebugFlag {
+		log.Println("thread", threadnbr, "prepare delete stmt at conn level")
+	}
+
+	stmtDel, err := db.Prepare("delete from " + TableName + " where rowid in (select rid from bigdeletetemp)")
+	if err != nil {
+		// TODO a better way to stop on errors
+		log.Println("failed to prepare statement", err)
+		os.Exit(6)
+	}
+	defer stmtDel.Close()
+
+	var stmtInsTx, stmtDelTx *sql.Stmt
+
+	tx, err = db.Begin()
+	if err != nil {
+		// TODO a better way to stop on errors
+		log.Println("failed to start transaction", err)
+		os.Exit(8)
+	}
+	stmtInsTx = tx.Stmt(stmtIns)
+	stmtDelTx = tx.Stmt(stmtDel)
+
+	for rid := range ch {
+
+		if DebugFlag {
+			log.Println("thread", threadnbr, "read rid", rid)
+		}
+
+		_, err := stmtInsTx.Exec(rid)
+		if err != nil && DebugFlag {
+			log.Println("insert received error", rid, err)
+		}
+		if err != nil {
+			// TODO a better way to stop on errors
+			log.Println("failed to insert into temp table bigdeletetemp "+rid, err)
+			os.Exit(8)
+		}
+
+		totrows++
+		crtrows++
+		if DebugFlag {
+			log.Println("thread", threadnbr, "total", totrows, "crt", crtrows)
+		}
+
+		if crtrows == Rowidspercall {
+			if DebugFlag {
+				log.Println("thread", threadnbr, "running delete")
+			}
+
+			stmtDelTx = tx.Stmt(stmtDel)
+
+			ret, err := stmtDelTx.Exec()
+			if err != nil {
+				// TODO a better way to stop on errors
+				log.Println("failed to delete", err)
+				os.Exit(10)
+			}
+
+			rowsdeleted, err := ret.RowsAffected()
+			if err != nil {
+				// TODO a better way to stop on errors
+				log.Println("failed to get number of rows affected", err)
+				os.Exit(15)
+			}
+			if DebugFlag {
+				log.Println("rows deleted", rowsdeleted)
+			}
+
+			if DebugFlag {
+				log.Println("thread", threadnbr, "commit")
+			}
+			// if DebugFlag {
+			// log.Println("thread", threadnbr, "before commit, sleep")
+			// time.Sleep(5 * time.Second)
+			// }
+
+			err = tx.Commit()
+			if err != nil {
+				// TODO a better way to stop on errors
+				log.Println("failed to commit", err)
+				os.Exit(11)
+			}
+
+			chok <- count{threadnbr, crtrows, int(rowsdeleted)}
+			crtrows = 0
+
+			tx, err = db.Begin()
+			if err != nil {
+				// TODO a better way to stop on errors
+				log.Println("failed to start transaction", err)
+				os.Exit(12)
+			}
+			stmtInsTx = tx.Stmt(stmtIns)
+			stmtDelTx = tx.Stmt(stmtDel)
+		}
+	}
+
+	// read all the input rows and we have some left not committed
+	if crtrows != 0 {
+		if DebugFlag {
+			log.Println("thread", threadnbr, "running final delete")
+		}
+
+		ret, err := stmtDelTx.Exec()
+		if err != nil {
+			// TODO a better way to stop on errors
+			log.Println("failed to delete", err)
+			os.Exit(14)
+		}
+
+		rowsdeleted, err := ret.RowsAffected()
+		if DebugFlag {
+			log.Println("thread", threadnbr, "rows deleted", rowsdeleted)
+		}
+
+		chok <- count{threadnbr, crtrows, int(rowsdeleted)}
+
+		err = tx.Commit()
+		if err != nil {
+			// TODO a better way to stop on errors
+			log.Println("failed to commit", err)
+			os.Exit(14)
+		}
+	}
+
+	// log.Println("consumer", threadnbr, "processed", totcnt, "rows")
+	wg.Done()
+}
+
+func countreader(ch chan count, wg *sync.WaitGroup) {
+	var (
+		totaltarget int
+		totaldelete int
+		// interval     int = numthreads * rowidspercall
+		// lastreported int
+	)
+
+	for del := range ch {
+		totaltarget += del.counttarget
+		totaldelete += del.countdelete
+		//	if totaldeleted >= lastreported+interval {
+		//log.Println("table", tableName, "thread", del.deleter, "deleted", totaldeleted)
+		log.Println(TableName, totaltarget, totaldelete, "[", del.deleter, "]", del.counttarget, del.countdelete)
+		// lastreported = totaldeleted
+		//	}
+	}
+
+	fmt.Println(TableName, totaltarget, totaldelete)
+	wg.Done()
 }
