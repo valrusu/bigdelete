@@ -84,25 +84,32 @@ select '======','======' from dual`
 	// chcnt receives count of deleted ROWIDs from consumers, keeps a total, and writes it to stdout at the end
 	chcnt := make(chan count)
 
-	go piperowids(bufio.NewScanner(os.Stdin), chdata)
+	var wgdata, wgcnt, wgpiper sync.WaitGroup
 
-	var wgdata, wgcnt sync.WaitGroup
-	//	log.Println("read rowid", <-out)
-	//	log.Println("read rowid", <-out)
-	//	log.Println("read rowid", <-out)
+	wgpiper.Add(1)
+	go piperowids(bufio.NewScanner(os.Stdin), chdata, &wgpiper)
 
-	// wgcnt.Add(1)
-	wgcnt.Add(Numthreads)
+	wgcnt.Add(1)
 	go countreader(chcnt, &wgcnt)
+
+	wgdata.Add(Numthreads)
 
 	for i := 0; i < Numthreads; i++ {
 		// wgdata.Add(1)
 		go deletedata(i, chdata, chcnt, db, &wgdata)
 	}
 
+	// wait for all delete threads
+	// when they finish reading from the dataCh they stop
 	wgdata.Wait()
+
+	// nothing will write to the countCh anymore
+	// close the channel and wait for the goroutine to finish
 	close(chcnt)
 	wgcnt.Wait()
+
+	// this should be done already at this point since all the data delete threads are done
+	wgpiper.Wait()
 
 	return Progerr{nil, "", 0}
 }
@@ -118,13 +125,12 @@ select '======','======' from dual`
 // }
 
 // piperowids reads ROWIDs from stdin and pushes them in the ch channel for fanning out
-func piperowids(in *bufio.Scanner, ch chan string) {
-	cnt := 0
+func piperowids(in *bufio.Scanner, ch chan string, wg *sync.WaitGroup) {
 	for in.Scan() {
 		ch <- in.Text()
-		cnt++
 	}
 	close(ch)
+	wg.Done()
 }
 
 // deletedata reads ROWIDs from the ch channel, inserts them in the temp table and then deletes them from the target table
@@ -247,6 +253,7 @@ func deletedata(threadnbr int, ch chan string, chok chan count, db *sql.DB, wg *
 				log.Println("failed to start transaction", err)
 				os.Exit(12)
 			}
+
 			stmtInsTx = tx.Stmt(stmtIns)
 			stmtDelTx = tx.Stmt(stmtDel)
 		}
@@ -270,14 +277,14 @@ func deletedata(threadnbr int, ch chan string, chok chan count, db *sql.DB, wg *
 			log.Println("thread", threadnbr, "rows deleted", rowsdeleted)
 		}
 
-		chok <- count{threadnbr, crtrows, int(rowsdeleted)}
-
 		err = tx.Commit()
 		if err != nil {
 			// TODO a better way to stop on errors
 			log.Println("failed to commit", err)
 			os.Exit(14)
 		}
+
+		chok <- count{threadnbr, crtrows, int(rowsdeleted)}
 	}
 
 	// log.Println("consumer", threadnbr, "processed", totcnt, "rows")
