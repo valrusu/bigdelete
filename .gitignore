@@ -2,3 +2,5 @@ cmd/bigdelete/bigdelete
 cmd/bigdelete/bigdelete.gz
 cmd/bigdelete/bigdelete.exe
 cmd/bigdelete/bigdelete.exe.gz
+cmd/bigdelete
+cmd/bigdelete.gz
