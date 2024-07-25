@@ -8,7 +8,8 @@ import (
 	"flag"
 	"log"
 	"os"
-
+	// "github.com/godror/godror"
+	_ "github.com/godror/godror"
 	// github.com/valrusu/bigdelete/pkg
 	"github.com/valrusu/bigdelete"
 )
