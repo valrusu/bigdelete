@@ -1,4 +1,5 @@
 # needs to be compiled on Linux due to the godror dependency
+# maybe on sandag app server 172.22.5.85 as etctrx
 set -e
 set -o pipefail
 
