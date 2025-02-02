@@ -5,15 +5,17 @@ When the amount of data to be deleted from an Oracle table gets really big, the 
 - simple DELETE statetemt with or without a WHERE clause: may cause huge UNDO usage, table scans which take forever etc
 - "create table as select" from the original table and rename the new and old tables: not an online operation
 - TODO online move table, with or without a WHERE clause
-- TODO describe other mothods I tried and why they failed
+- TODO describe other methods I tried and why they failed
+- cursor on original table + delete = consistency issues
 
 With bigdelete I am following this approach:
-- generate a list of ROWIDs to be deleted from a table; save them in a file
+- generate a list of ROWIDs to be deleted from a table; save them in a file to avoid the need for the DB to maintain consistency
 - call bigdelete, piping the list of ROWIDs to it.
 - bigdelete opens a number of parallel sessions (the -threads parameter) and in each one deletes N ROWIDs at a time (the -commit parameter), using the ROWIDs from its standard input, until all are deleted.
 - the process for each sessions is:
   - insert N ROWIDs into a temp table (called bigdeletemp)
-  - run "delete from target_table where rowid in (select rid from bigdeletetemp)
+  - run "delete from target_table where rowid in (select rid from bigdeletetemp).
+    By using the temp table we will have a single SQL query parsed.
   - commit
   - repeat until no more ROWIDs read in stdin
 
