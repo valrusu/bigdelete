@@ -23,6 +23,7 @@ type count struct {
 	deleter     int
 	counttarget int
 	countdelete int
+	timetaken   time.Duration
 }
 
 type Progerr struct {
@@ -146,6 +147,7 @@ func deletedata(threadnbr int, ch chan string, chok chan count, db *sql.DB, wg *
 		totrows int
 		crtrows int
 		tx      *sql.Tx
+		t1, t2  time.Time
 	)
 
 	if DebugFlag {
@@ -182,6 +184,8 @@ func deletedata(threadnbr int, ch chan string, chok chan count, db *sql.DB, wg *
 	}
 	stmtInsTx = tx.Stmt(stmtIns)
 	stmtDelTx = tx.Stmt(stmtDel)
+
+	t1 = time.Now()
 
 	for rid := range ch {
 
@@ -244,8 +248,10 @@ func deletedata(threadnbr int, ch chan string, chok chan count, db *sql.DB, wg *
 				os.Exit(11)
 			}
 
-			chok <- count{threadnbr, crtrows, int(rowsdeleted)}
+			t2 = time.Now()
+			chok <- count{threadnbr, crtrows, int(rowsdeleted), t2.Sub(t1)}
 			crtrows = 0
+			t1 = t2
 
 			tx, err = db.Begin()
 			if err != nil {
@@ -284,7 +290,8 @@ func deletedata(threadnbr int, ch chan string, chok chan count, db *sql.DB, wg *
 			os.Exit(14)
 		}
 
-		chok <- count{threadnbr, crtrows, int(rowsdeleted)}
+		t2 = time.Now()
+		chok <- count{threadnbr, crtrows, int(rowsdeleted), t2.Sub(t1)}
 	}
 
 	// log.Println("consumer", threadnbr, "processed", totcnt, "rows")
@@ -304,7 +311,8 @@ func countreader(ch chan count, wg *sync.WaitGroup) {
 		totaldelete += del.countdelete
 		//	if totaldeleted >= lastreported+interval {
 		//log.Println("table", tableName, "thread", del.deleter, "deleted", totaldeleted)
-		log.Println(TableName, totaltarget, totaldelete, "[", del.deleter, "]", del.counttarget, del.countdelete)
+		// log.Println(TableName, totaltarget, totaldelete, "[", del.deleter, "]", del.counttarget, del.countdelete, del.timetaken)
+		log.Printf("%s %d %d [ %d ] %d %d %.2f", TableName, totaltarget, totaldelete, del.deleter, del.counttarget, del.countdelete, del.timetaken.Seconds())
 		// lastreported = totaldeleted
 		//	}
 	}
