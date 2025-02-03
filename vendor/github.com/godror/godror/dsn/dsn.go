@@ -7,6 +7,7 @@ package dsn
 
 import (
 	"context"
+	"database/sql"
 	"database/sql/driver"
 	"encoding"
 	"errors"
@@ -43,37 +44,41 @@ const (
 	DefaultWaitTimeout = 30 * time.Second
 	// DefaultMaxLifeTime is the maximum time in seconds till a pooled session may exist
 	DefaultMaxLifeTime = 1 * time.Hour
-	//DefaultStandaloneConnection holds the default for standaloneConnection.
-	DefaultStandaloneConnection = false
+	// DefaultStandaloneConnection holds the default for standaloneConnection.
+	DefaultStandaloneConnection = true
+	// DefaultNoBreakOnContextCancel holds the default for noBreakOnContext
+	DefaultNoBreakOnContextCancel = false
 )
 
 type CommonSimpleParams struct {
 	Timezone                *time.Location
 	ConfigDir, LibDir       string
 	Username, ConnectString string
+	Token, PrivateKey       string
 	Password                Password
 	Charset                 string
 	// StmtCacheSize of 0 means the default, -1 to disable the stmt cache completely
 	StmtCacheSize int
 	// true: OnInit will be called only by the new session / false: OnInit will called by new or pooled connection
-	InitOnNewConn           bool
-	EnableEvents, NoTZCheck bool
+	InitOnNewConn                               bool
+	EnableEvents, NoTZCheck, PerSessionTimezone bool
+	NoBreakOnContextCancel                      bool
 }
 
 // CommonParams holds the common parameters for pooled or standalone connections.
 //
 // For details, see https://oracle.github.io/odpi/doc/structs/dpiCommonCreateParams.html#dpicommoncreateparams
 type CommonParams struct {
-	CommonSimpleParams
 	// Logger is the per-pool or per-connection logger.
 	// The default nil logger does not log.
 	Logger *slog.Logger
 	// OnInit is executed on session init. Overrides AlterSession and OnInitStmts!
-	OnInit func(context.Context, driver.ConnPrepareContext) error
+	OnInit func(context.Context, driver.ConnPrepareContext) error `json:"-"`
 	// OnInitStmts are executed on session init, iff OnInit is nil.
 	OnInitStmts []string
 	// AlterSession key-values are set with "ALTER SESSION SET key=value" on session init, iff OnInit is nil.
 	AlterSession [][2]string
+	CommonSimpleParams
 }
 
 func (P CommonParams) String() string {
@@ -103,6 +108,7 @@ func (P CommonSimpleParams) String() string {
 	if P.LibDir != "" {
 		q.Add("libDir", P.LibDir)
 	}
+	s = ""
 	tz := P.Timezone
 	if tz != nil {
 		if tz == time.Local {
@@ -111,12 +117,17 @@ func (P CommonSimpleParams) String() string {
 			s = tz.String()
 		}
 	}
-	q.Add("timezone", s)
+	if s != "" {
+		q.Add("timezone", s)
+	}
 	if P.EnableEvents {
 		q.Add("enableEvents", "1")
 	}
 	if P.NoTZCheck {
 		q.Add("noTimezoneCheck", "1")
+	}
+	if P.PerSessionTimezone {
+		q.Add("perSessionTimezone", "1")
 	}
 	if P.StmtCacheSize != 0 {
 		q.Add("stmtCacheSize", strconv.Itoa(int(P.StmtCacheSize)))
@@ -126,6 +137,9 @@ func (P CommonSimpleParams) String() string {
 	}
 	if P.InitOnNewConn {
 		q.Add("initOnNewConnection", "1")
+	}
+	if P.NoBreakOnContextCancel {
+		q.Add("noBreakOnContextCancel", "1")
 	}
 
 	s = q.String()
@@ -173,17 +187,25 @@ func (P ConnParams) String() string {
 	return q.String()
 }
 
+// AccessToken Data for Token Authentication.
+type AccessToken struct {
+	Token      string
+	PrivateKey string
+}
+
 // PoolParams holds the configuration of the Oracle Session Pool.
 //
 // For details, see https://oracle.github.io/odpi/doc/structs/dpiPoolCreateParams.html#dpipoolcreateparams
 //
 // For details, see https://oracle.github.io/odpi/doc/structs/dpiPoolCreateParams.html#dpipoolcreateparams
 type PoolParams struct {
+	TokenCBCtx                                 context.Context                           `json:"-"`
+	TokenCB                                    func(context.Context, *AccessToken) error `json:"-"`
 	MinSessions, MaxSessions, SessionIncrement int
 	MaxSessionsPerShard                        int
 	WaitTimeout, MaxLifeTime, SessionTimeout   time.Duration
 	PingInterval                               time.Duration
-	Heterogeneous, ExternalAuth                bool
+	Heterogeneous, ExternalAuth                sql.NullBool
 }
 
 // String returns the string representation of PoolParams.
@@ -191,19 +213,27 @@ func (P PoolParams) String() string {
 	q := acquireParamsArray(8)
 	defer releaseParamsArray(q)
 	q.Add("poolMinSessions", strconv.Itoa(P.MinSessions))
-	q.Add("poolMaxSessions", strconv.Itoa(P.MaxSessions))
+	if P.MaxSessions != 0 {
+		q.Add("poolMaxSessions", strconv.Itoa(P.MaxSessions))
+	}
 	if P.MaxSessionsPerShard != 0 {
-		q.Add("poolMasSessionsPerShard", strconv.Itoa(P.MaxSessionsPerShard))
+		q.Add("poolMaxSessionsPerShard", strconv.Itoa(P.MaxSessionsPerShard))
 	}
 	q.Add("poolIncrement", strconv.Itoa(P.SessionIncrement))
-	if P.Heterogeneous {
-		q.Add("heterogeneousPool", "1")
+	if P.Heterogeneous.Valid {
+		q.Add("heterogeneousPool", b2s(P.Heterogeneous.Bool))
 	}
-	q.Add("poolWaitTimeout", P.WaitTimeout.String())
-	q.Add("poolSessionMaxLifetime", P.MaxLifeTime.String())
-	q.Add("poolSessionTimeout", P.SessionTimeout.String())
-	if P.ExternalAuth {
-		q.Add("externalAuth", "1")
+	if P.WaitTimeout != 0 {
+		q.Add("poolWaitTimeout", P.WaitTimeout.String())
+	}
+	if P.MaxLifeTime != 0 {
+		q.Add("poolSessionMaxLifetime", P.MaxLifeTime.String())
+	}
+	if P.SessionTimeout != 0 {
+		q.Add("poolSessionTimeout", P.SessionTimeout.String())
+	}
+	if P.ExternalAuth.Valid {
+		q.Add("externalAuth", b2s(P.ExternalAuth.Bool))
 	}
 	if P.PingInterval != 0 {
 		q.Add("pingInterval", P.PingInterval.String())
@@ -215,31 +245,39 @@ func (P PoolParams) String() string {
 // You can use ConnectionParams{...}.StringWithPassword()
 // as a connection string in sql.Open.
 type ConnectionParams struct {
-	ConnParams
 	CommonParams
+	ConnParams
 	PoolParams
 	// ConnParams.NewPassword is used iff StandaloneConnection is true!
-	StandaloneConnection bool
+	StandaloneConnection sql.NullBool
 }
 
 // IsStandalone returns whether the connection should be standalone, not pooled.
 func (P ConnectionParams) IsStandalone() bool {
-	return P.StandaloneConnection || P.IsSysDBA || P.IsSysOper || P.IsSysASM || P.IsPrelim
+	return P.StandaloneConnection.Valid && P.StandaloneConnection.Bool ||
+		(!P.StandaloneConnection.Valid && DefaultStandaloneConnection) ||
+		P.ConnClass == NoConnectionPoolingConnectionClass ||
+		P.IsSysDBA || P.IsSysOper || P.IsSysASM || P.IsPrelim
 }
 
 func (P *ConnectionParams) comb() {
-	P.StandaloneConnection = P.StandaloneConnection || P.ConnClass == NoConnectionPoolingConnectionClass
-	if P.IsPrelim || P.StandaloneConnection {
+	if (!P.StandaloneConnection.Valid || !P.StandaloneConnection.Bool) &&
+		P.ConnClass == NoConnectionPoolingConnectionClass {
+		P.StandaloneConnection = Bool(true)
+	}
+	if P.IsPrelim || P.StandaloneConnection.Valid && P.StandaloneConnection.Bool {
 		// Prelim: the shared memory may not exist when Oracle is shut down.
 		P.ConnClass = ""
-		P.Heterogeneous = false
+		P.Heterogeneous = Bool(false)
 	}
 	if !P.IsStandalone() {
 		P.NewPassword.Reset()
 		// only enable external authentication if we are dealing with a
 		// homogeneous pool and no user name/password has been specified
-		if P.Username == "" && P.Password.IsZero() && !P.Heterogeneous {
-			P.ExternalAuth = true
+		if P.Username == "" && P.Password.IsZero() &&
+			!P.ExternalAuth.Valid &&
+			!(P.Heterogeneous.Valid && P.Heterogeneous.Bool) {
+			P.ExternalAuth = Bool(true)
 		}
 	}
 }
@@ -281,6 +319,12 @@ func (P ConnectionParams) string(class, withPassword bool) string {
 	if withPassword {
 		q.Add("password", P.Password.Secret())
 		q.Add("newPassword", P.NewPassword.Secret())
+		if P.Token != "" {
+			q.Add("token", P.Token)
+		}
+		if P.PrivateKey != "" {
+			q.Add("privateKey", P.PrivateKey)
+		}
 	} else {
 		q.Add("password", P.Password.String())
 		if !P.NewPassword.IsZero() {
@@ -295,14 +339,15 @@ func (P ConnectionParams) string(class, withPassword bool) string {
 			s = tz.String()
 		}
 	}
-	q.Add("timezone", s)
-	B := func(b bool) string {
-		if b {
-			return "1"
-		}
-		return "0"
+	if s != "" {
+		q.Add("timezone", s)
 	}
-	q.Add("noTimezoneCheck", B(P.NoTZCheck))
+	if P.NoTZCheck {
+		q.Add("noTimezoneCheck", "1")
+	}
+	if P.PerSessionTimezone {
+		q.Add("perSessionTimezone", "1")
+	}
 	if P.StmtCacheSize != 0 {
 		q.Add("stmtCacheSize", strconv.Itoa(int(P.StmtCacheSize)))
 	}
@@ -310,23 +355,49 @@ func (P ConnectionParams) string(class, withPassword bool) string {
 		q.Add("charset", P.Charset)
 	}
 	q.Add("poolMinSessions", strconv.Itoa(P.MinSessions))
-	q.Add("poolMaxSessions", strconv.Itoa(P.MaxSessions))
+	if P.MaxSessions != 0 {
+		q.Add("poolMaxSessions", strconv.Itoa(P.MaxSessions))
+	}
 	if P.MaxSessionsPerShard != 0 {
 		q.Add("poolMasSessionsPerShard", strconv.Itoa(P.MaxSessionsPerShard))
 	}
 	q.Add("poolIncrement", strconv.Itoa(P.SessionIncrement))
-	q.Add("sysdba", B(P.IsSysDBA))
-	q.Add("sysoper", B(P.IsSysOper))
-	q.Add("sysasm", B(P.IsSysASM))
-	q.Add("standaloneConnection", B(P.StandaloneConnection))
-	q.Add("enableEvents", B(P.EnableEvents))
-	q.Add("heterogeneousPool", B(P.Heterogeneous))
-	q.Add("externalAuth", B(P.ExternalAuth))
-	q.Add("prelim", B(P.IsPrelim))
-	q.Add("poolWaitTimeout", P.WaitTimeout.String())
-	q.Add("poolSessionMaxLifetime", P.MaxLifeTime.String())
-	q.Add("poolSessionTimeout", P.SessionTimeout.String())
-	q.Add("pingInterval", P.PingInterval.String())
+	if P.IsSysDBA {
+		q.Add("sysdba", "1")
+	}
+	if P.IsSysOper {
+		q.Add("sysoper", "1")
+	}
+	if P.IsSysASM {
+		q.Add("sysasm", "1")
+	}
+	if P.StandaloneConnection.Valid {
+		q.Add("standaloneConnection", b2s(P.StandaloneConnection.Bool))
+	}
+	if P.EnableEvents {
+		q.Add("enableEvents", "1")
+	}
+	if P.Heterogeneous.Valid {
+		q.Add("heterogeneousPool", b2s(P.Heterogeneous.Bool))
+	}
+	if P.ExternalAuth.Valid {
+		q.Add("externalAuth", b2s(P.ExternalAuth.Bool))
+	}
+	if P.IsPrelim {
+		q.Add("prelim", "1")
+	}
+	if P.WaitTimeout != 0 {
+		q.Add("poolWaitTimeout", P.WaitTimeout.String())
+	}
+	if P.MaxLifeTime != 0 {
+		q.Add("poolSessionMaxLifetime", P.MaxLifeTime.String())
+	}
+	if P.SessionTimeout != 0 {
+		q.Add("poolSessionTimeout", P.SessionTimeout.String())
+	}
+	if P.PingInterval != 0 {
+		q.Add("pingInterval", P.PingInterval.String())
+	}
 	as := acquireParamsArray(1)
 	defer releaseParamsArray(as)
 	for _, kv := range P.AlterSession {
@@ -334,10 +405,19 @@ func (P ConnectionParams) string(class, withPassword bool) string {
 		as.Add(kv[0], kv[1])
 		q.Add("alterSession", strings.TrimSpace(as.String()))
 	}
-	q.Add("initOnNewConnection", B(P.InitOnNewConn))
+	if P.InitOnNewConn {
+		q.Add("initOnNewConnection", "1")
+	}
+	if P.NoBreakOnContextCancel {
+		q.Add("noBreakOnContextCancel", "1")
+	}
 	q.Values["onInit"] = P.OnInitStmts
-	q.Add("configDir", P.ConfigDir)
-	q.Add("libDir", P.LibDir)
+	if P.ConfigDir != "" {
+		q.Add("configDir", P.ConfigDir)
+	}
+	if P.LibDir != "" {
+		q.Add("libDir", P.LibDir)
+	}
 	//return quoteRunes(P.Username, "/@") + "/" + quoteRunes(password, "@") + "@" + P.CommonParams.ConnectString + "\n" + q.String()
 
 	return q.String()
@@ -348,7 +428,7 @@ func (P ConnectionParams) string(class, withPassword bool) string {
 // For examples, see [../doc/connection.md](../doc/connection.md)
 func Parse(dataSourceName string) (ConnectionParams, error) {
 	P := ConnectionParams{
-		StandaloneConnection: DefaultStandaloneConnection,
+		// StandaloneConnection: DefaultStandaloneConnection,
 		//CommonParams: CommonParams{ Timezone: time.Local, },
 		ConnParams: ConnParams{
 			ConnClass: DefaultConnectionClass,
@@ -393,7 +473,7 @@ func Parse(dataSourceName string) (ConnectionParams, error) {
 		}
 		//fmt.Printf("URL=%s cs=%q host=%q port=%q path=%q\n", u, P.ConnectString, u.Host, u.Port(), u.Path)
 		q = u.Query()
-	} else if strings.Contains(dataSourceName, "\n") || // multi-line, or
+	} else if strings.IndexByte(dataSourceName, '\n') >= 0 || // multi-line, or
 		strings.Contains(dataSourceName, "connectString=") { // contains connectString
 		// This should be a proper logfmt-encoded parameter string, with connectString
 		paramsString, dataSourceName = dataSourceName, ""
@@ -439,6 +519,10 @@ func Parse(dataSourceName string) (ConnectionParams, error) {
 					P.Password.Set(value)
 				case "charset":
 					P.Charset = value
+				case "token":
+					P.Token = value
+				case "privateKey":
+					P.PrivateKey = value
 				case "alterSession", "onInit", "shardingKey", "superShardingKey":
 					q.Add(key, value)
 				default:
@@ -446,6 +530,7 @@ func Parse(dataSourceName string) (ConnectionParams, error) {
 				}
 			}
 		}
+		// fmt.Printf("Parse q=%#v\n", q)
 		if err := d.Err(); err != nil {
 			return P, fmt.Errorf("parsing parameters %q: %w", paramsString, err)
 		}
@@ -467,12 +552,11 @@ func Parse(dataSourceName string) (ConnectionParams, error) {
 		{&P.IsPrelim, "prelim"},
 
 		{&P.EnableEvents, "enableEvents"},
-		{&P.Heterogeneous, "heterogeneousPool"},
-		{&P.ExternalAuth, "externalAuth"},
-		{&P.StandaloneConnection, "standaloneConnection"},
 
 		{&P.NoTZCheck, "noTimezoneCheck"},
+		{&P.PerSessionTimezone, "perSessionTimezone"},
 		{&P.InitOnNewConn, "initOnNewConnection"},
+		{&P.NoBreakOnContextCancel, "noBreakOnContextCancel"},
 	} {
 		s := q.Get(task.Key)
 		if s == "" {
@@ -482,10 +566,30 @@ func Parse(dataSourceName string) (ConnectionParams, error) {
 		if *task.Dest, err = strconv.ParseBool(s); err != nil {
 			return P, fmt.Errorf("%s=%q: %w", task.Key, s, err)
 		}
-		if task.Key == "heterogeneousPool" {
-			P.StandaloneConnection = !P.Heterogeneous
-		}
 	}
+
+	for _, task := range []struct {
+		Dest *sql.NullBool
+		Key  string
+	}{
+		{&P.Heterogeneous, "heterogeneousPool"},
+		{&P.ExternalAuth, "externalAuth"},
+		{&P.StandaloneConnection, "standaloneConnection"},
+	} {
+		s := q.Get(task.Key)
+		if s == "" {
+			continue
+		}
+		b, err := strconv.ParseBool(s)
+		if err != nil {
+			return P, fmt.Errorf("%s=%q: %w", task.Key, s, err)
+		}
+		*task.Dest = Bool(b)
+	}
+	if !P.StandaloneConnection.Valid && P.Heterogeneous.Valid {
+		P.StandaloneConnection = Bool(!P.Heterogeneous.Bool)
+	}
+	// fmt.Println("parse", P.StringWithPassword())
 
 	if tz := q.Get("timezone"); tz != "" {
 		if strings.EqualFold(tz, "local") {
@@ -590,10 +694,10 @@ func Parse(dataSourceName string) (ConnectionParams, error) {
 	P.ConfigDir = q.Get("configDir")
 	P.LibDir = q.Get("libDir")
 
-	//fmt.Printf("cs1=%q\n", P.ConnectString)
+	// fmt.Printf("cs1=%q\n", P)
 	P.comb()
 
-	//fmt.Printf("cs2=%q\n", P.ConnectString)
+	// fmt.Printf("cs2=%q\n", P)
 
 	return P, nil
 }
@@ -920,3 +1024,13 @@ func (cw *countingWriter) Write(p []byte) (int, error) {
 	cw.N += int64(n)
 	return n, err
 }
+
+func b2s(b bool) string {
+	if b {
+		return "1"
+	}
+	return "0"
+}
+
+// Bool is an sql.NullBool helper
+func Bool(b bool) sql.NullBool { return sql.NullBool{Valid: true, Bool: b} }
