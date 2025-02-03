@@ -1,0 +1,13 @@
+686646661 7779696 bigdelete
+	linux-vdso.so.1 =>  (0x00007f734d154000)
+	libdl.so.2 => /lib64/libdl.so.2 (0x00007f734ca00000)
+	libpthread.so.0 => /lib64/libpthread.so.0 (0x00007f734c600000)
+	libc.so.6 => /lib64/libc.so.6 (0x00007f734c200000)
+	/lib64/ld-linux-x86-64.so.2 (0x00007f734ce00000)
+glibc-common-2.17-326.0.9.el7_9.3.x86_64
+glibc-devel-2.17-326.0.9.el7_9.3.x86_64
+glibc-2.17-326.0.9.el7_9.3.x86_64
+glibc-headers-2.17-326.0.9.el7_9.3.x86_64
+libgcc-4.8.5-44.0.3.el7.x86_64
+gcc-4.8.5-44.0.3.el7.x86_64
+gcc-c++-4.8.5-44.0.3.el7.x86_64
