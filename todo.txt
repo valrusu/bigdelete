@@ -1,4 +1,4 @@
-- fail nicer if the delete fails (maybe due to a FK constraint); current it just crashes
+- fail nicer if the delete fails (maybe due to a FK constraint); currently it just crashes
 - add tnsadmin parameter
     - full path
     or 
