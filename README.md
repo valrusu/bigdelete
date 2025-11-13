@@ -49,8 +49,10 @@ version 2:
 	SQLs are reused
 
 	bigdeletetemp table is hardcoded - it can be a synonym to any table with the structure:
-drop table bigdeletetemp;
+<pre>
+drop table bigdeletetemp purge;
 create global temporary table bigdeletetemp (rid rowid) on commit delete rows;
+</pre>
 
 DB transactions in Go:		
 https://go.dev/doc/database/execute-transactions
