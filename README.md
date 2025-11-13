@@ -1,11 +1,11 @@
 # bigdelete
-bigdelete handles lots of deletes from and Oracle table
+bigdelete handles lots of deletes from an Oracle table
 
 When the amount of data to be deleted from an Oracle table gets really big, the usual approaches may not work anymore:
 - simple DELETE statetemt with or without a WHERE clause: may cause huge UNDO usage, table scans which take forever etc
 - "create table as select" from the original table and rename the new and old tables: not an online operation
-- TODO online move table, with or without a WHERE clause
-- TODO describe other methods I tried and why they failed
+- online move table, with or without a WHERE clause
+- partition pruning - from 12c seems to work fine with global indexes too, but it requires ... partitioning option (license) and to really have the tables partitioned using the same criteria used for data purging
 - cursor on original table + delete = consistency issues
 
 With bigdelete I am following this approach:
