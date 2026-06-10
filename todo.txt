@@ -5,3 +5,4 @@
     - same directory as the executable with "."
     - see dataarchive
     - make dataarchive pass it to bigdelete
+- option to group rowids so a batch of N gets deleted by the same goroutine
