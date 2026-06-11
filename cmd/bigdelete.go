@@ -20,6 +20,7 @@ func main() {
 	flag.StringVar(&bigdelete.TableName, "table", "", "")
 	flag.IntVar(&bigdelete.Numthreads, "threads", 20, "")
 	flag.IntVar(&bigdelete.Rowidspercall, "commit", 1237, "")
+	flag.IntVar(&bigdelete.Groupsize, "group", 1, "")
 	flag.StringVar(&bigdelete.Tnsadmin, "tnsadmin", "", "")
 	flag.BoolVar(&bigdelete.DebugFlag, "debug", false, "")
 	flag.Parse()

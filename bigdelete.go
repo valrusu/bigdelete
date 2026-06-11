@@ -14,6 +14,7 @@ var (
 	ConnStr, TableName, Tnsadmin string
 	Numthreads                   int
 	Rowidspercall                int
+	Groupsize                    int
 	DebugFlag                    bool
 	db                           *sql.DB
 	err                          error
@@ -33,13 +34,17 @@ type Progerr struct {
 }
 
 func BigDelete() Progerr {
+	if Groupsize < 1 {
+		Groupsize = 1
+	}
+
 	db, err = sql.Open("godror", ConnStr)
 	if err != nil {
 		return Progerr{err, "cannot connect to database", 1}
 	}
 	defer db.Close()
 	if DebugFlag {
-		log.Println("connecteds [ 5s ]")
+		log.Println("connected [ 5s ]")
 		time.Sleep(5 * time.Second)
 	}
 
@@ -80,8 +85,9 @@ select '======','======' from dual`
 
 	}
 
-	// chdata passes the ROWDIDs from stdin for deletion
-	chdata := make(chan string)
+	// chdata passes the ROWDIDs from stdin for deletion, in groups of
+	// Groupsize sequential ROWIDs so rows from the same block stay in one session
+	chdata := make(chan []string)
 	// chcnt receives count of deleted ROWIDs from consumers, keeps a total, and writes it to stdout at the end
 	chcnt := make(chan count)
 
@@ -125,17 +131,26 @@ select '======','======' from dual`
 // 	}
 // }
 
-// piperowids reads ROWIDs from stdin and pushes them in the ch channel for fanning out
-func piperowids(in *bufio.Scanner, ch chan string, wg *sync.WaitGroup) {
+// piperowids reads ROWIDs from stdin and pushes them in the ch channel for fanning out,
+// grouped in batches of Groupsize sequential ROWIDs
+func piperowids(in *bufio.Scanner, ch chan []string, wg *sync.WaitGroup) {
+	batch := make([]string, 0, Groupsize)
 	for in.Scan() {
-		ch <- in.Text()
+		batch = append(batch, in.Text())
+		if len(batch) == Groupsize {
+			ch <- batch
+			batch = make([]string, 0, Groupsize)
+		}
+	}
+	if len(batch) > 0 {
+		ch <- batch
 	}
 	close(ch)
 	wg.Done()
 }
 
-// deletedata reads ROWIDs from the ch channel, inserts them in the temp table and then deletes them from the target table
-func deletedata(threadnbr int, ch chan string, chok chan count, db *sql.DB, wg *sync.WaitGroup) {
+// deletedata reads batches of ROWIDs from the ch channel, inserts them in the temp table and then deletes them from the target table
+func deletedata(threadnbr int, ch chan []string, chok chan count, db *sql.DB, wg *sync.WaitGroup) {
 	// read N
 	// build a block
 	// call DB
@@ -187,81 +202,83 @@ func deletedata(threadnbr int, ch chan string, chok chan count, db *sql.DB, wg *
 
 	t1 = time.Now()
 
-	for rid := range ch {
-
-		if DebugFlag {
-			log.Println("thread", threadnbr, "read rid", rid)
-		}
-
-		_, err := stmtInsTx.Exec(rid)
-		if err != nil && DebugFlag {
-			log.Println("insert received error", rid, err)
-		}
-		if err != nil {
-			// TODO a better way to stop on errors
-			log.Println("failed to insert into temp table bigdeletetemp "+rid, err)
-			os.Exit(8)
-		}
-
-		totrows++
-		crtrows++
-		if DebugFlag {
-			log.Println("thread", threadnbr, "total", totrows, "crt", crtrows)
-		}
-
-		if crtrows == Rowidspercall {
-			if DebugFlag {
-				log.Println("thread", threadnbr, "running delete")
-			}
-
-			stmtDelTx = tx.Stmt(stmtDel)
-
-			ret, err := stmtDelTx.Exec()
-			if err != nil {
-				// TODO a better way to stop on errors
-				log.Println("failed to delete", err)
-				os.Exit(10)
-			}
-
-			rowsdeleted, err := ret.RowsAffected()
-			if err != nil {
-				// TODO a better way to stop on errors
-				log.Println("failed to get number of rows affected", err)
-				os.Exit(15)
-			}
-			if DebugFlag {
-				log.Println("rows deleted", rowsdeleted)
-			}
+	for batch := range ch {
+		for _, rid := range batch {
 
 			if DebugFlag {
-				log.Println("thread", threadnbr, "commit")
+				log.Println("thread", threadnbr, "read rid", rid)
 			}
-			// if DebugFlag {
-			// log.Println("thread", threadnbr, "before commit, sleep")
-			// time.Sleep(5 * time.Second)
-			// }
 
-			err = tx.Commit()
+			_, err := stmtInsTx.Exec(rid)
+			if err != nil && DebugFlag {
+				log.Println("insert received error", rid, err)
+			}
 			if err != nil {
 				// TODO a better way to stop on errors
-				log.Println("failed to commit", err)
-				os.Exit(11)
+				log.Println("failed to insert into temp table bigdeletetemp "+rid, err)
+				os.Exit(8)
 			}
 
-			t2 = time.Now()
-			chok <- count{threadnbr, crtrows, int(rowsdeleted), t2.Sub(t1)}
-			crtrows = 0
-			t1 = t2
-
-			tx, err = db.Begin()
-			if err != nil {
-				// TODO a better way to stop on errors
-				log.Println("failed to start transaction", err)
-				os.Exit(12)
+			totrows++
+			crtrows++
+			if DebugFlag {
+				log.Println("thread", threadnbr, "total", totrows, "crt", crtrows)
 			}
 
-			stmtInsTx = tx.Stmt(stmtIns)
-			stmtDelTx = tx.Stmt(stmtDel)
+			if crtrows == Rowidspercall {
+				if DebugFlag {
+					log.Println("thread", threadnbr, "running delete")
+				}
+
+				stmtDelTx = tx.Stmt(stmtDel)
+
+				ret, err := stmtDelTx.Exec()
+				if err != nil {
+					// TODO a better way to stop on errors
+					log.Println("failed to delete", err)
+					os.Exit(10)
+				}
+
+				rowsdeleted, err := ret.RowsAffected()
+				if err != nil {
+					// TODO a better way to stop on errors
+					log.Println("failed to get number of rows affected", err)
+					os.Exit(15)
+				}
+				if DebugFlag {
+					log.Println("rows deleted", rowsdeleted)
+				}
+
+				if DebugFlag {
+					log.Println("thread", threadnbr, "commit")
+				}
+				// if DebugFlag {
+				// log.Println("thread", threadnbr, "before commit, sleep")
+				// time.Sleep(5 * time.Second)
+				// }
+
+				err = tx.Commit()
+				if err != nil {
+					// TODO a better way to stop on errors
+					log.Println("failed to commit", err)
+					os.Exit(11)
+				}
+
+				t2 = time.Now()
+				chok <- count{threadnbr, crtrows, int(rowsdeleted), t2.Sub(t1)}
+				crtrows = 0
+				t1 = t2
+
+				tx, err = db.Begin()
+				if err != nil {
+					// TODO a better way to stop on errors
+					log.Println("failed to start transaction", err)
+					os.Exit(12)
+				}
+
+				stmtInsTx = tx.Stmt(stmtIns)
+				stmtDelTx = tx.Stmt(stmtDel)
+			}
 		}
 	}
 
