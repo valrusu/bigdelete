@@ -5,3 +5,7 @@
     - same directory as the executable with "."
     - see dataarchive
     - make dataarchive pass it to bigdelete
+- in piperowids, cut groups on block boundaries (rowid chars 7-15, file+block) instead of a fixed -group count,
+  so one block never splits across delete sessions; input is a serial FTS so same-block rowids are consecutive
+    - first measure how many rowids cluster per block: if blocks hold few rowids the groups get small
+      and commits would be issued too often
