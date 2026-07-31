@@ -4,3 +4,5 @@ cmd/bigdelete/bigdelete.exe
 cmd/bigdelete/bigdelete.exe.gz
 cmd/bigdelete
 cmd/bigdelete.gz
+cmd/bigdelete_oel7
+cmd/bigdelete_oel9
