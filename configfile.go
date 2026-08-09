@@ -41,7 +41,13 @@ type TableConfig struct {
 	Threads int    `json:"threads"`
 	Commit  int    `json:"commit"`
 	Group   int    `json:"group"`
-	Enabled bool   `json:"enabled"`
+	Enabled *bool  `json:"enabled"`
+}
+
+// isEnabled reports whether the table should be processed; a table is enabled
+// unless the config explicitly sets "enabled": false.
+func (t TableConfig) isEnabled() bool {
+	return t.Enabled == nil || *t.Enabled
 }
 
 func RunConfigFile(configFile string, parallel int, extractOnly bool) Progerr {
@@ -99,7 +105,7 @@ func loadConfigFile(path string) (ConfigFile, Progerr) {
 		if strings.TrimSpace(t.Table) == "" {
 			return cfg, Progerr{fmt.Errorf("tables[%d]: missing \"table\"", i), fmt.Sprintf("tables[%d]: missing \"table\"", i), 9}
 		}
-		if !cfg.DeleteOnly && strings.TrimSpace(t.SQL) == "" {
+		if t.isEnabled() && !cfg.DeleteOnly && strings.TrimSpace(t.SQL) == "" {
 			return cfg, Progerr{fmt.Errorf("tables[%d]: missing \"sql\"", i), fmt.Sprintf("tables[%d]: missing \"sql\"", i), 9}
 		}
 		if t.Threads == 0 {
@@ -112,10 +118,6 @@ func loadConfigFile(path string) (ConfigFile, Progerr) {
 		}
 		if t.Group == 0 {
 			t.Group = defaultGroup
-			cfg.Tables[i] = t
-		}
-		if !t.Enabled {
-			t.Enabled = true
 			cfg.Tables[i] = t
 		}
 	}
@@ -133,7 +135,7 @@ func runTablePool(db *sql.DB, cfg ConfigFile, parallel int, extractOnly bool) Pr
 		go func() {
 			defer wg.Done()
 			for t := range work {
-				if !t.Enabled {
+				if !t.isEnabled() {
 					continue
 				}
 				if perr := runOneTable(db, t, cfg.DeleteRowidFiles, cfg.CleanupRowidFiles, cfg.DeleteOnly, extractOnly); perr.Err != nil {
@@ -189,10 +191,13 @@ func runOneTable(db *sql.DB, t TableConfig, rowidDir string, cleanup bool, confi
 	}
 
 	defer func() {
-		if shouldCleanup && !DebugFlag {
+		if shouldCleanup {
+			if DebugFlag {
+				log.Println("table", t.Table, "removing rowid file", tmpPath)
+			}
 			os.Remove(tmpPath)
 		} else if DebugFlag {
-			log.Println("table", t.Table, "keeping rowid temp file", tmpPath)
+			log.Println("table", t.Table, "keeping rowid file", tmpPath)
 		}
 	}()
 
