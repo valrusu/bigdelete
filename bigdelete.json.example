@@ -1,0 +1,27 @@
+{
+  "parallel": 2,
+  "deleteRowidFiles": "/tmp/bigdelete-rowids",
+  "cleanupRowidFiles": false,
+  "tables": [
+    {
+      "table": "SCHEMA.OLD_DATA",
+      "sql": "select rowid from schema.old_data where year < 2020",
+      "threads": 20,
+      "commit": 5000,
+      "group": 100,
+      "enabled": true
+    },
+    {
+      "table": "SCHEMA.ARCHIVE",
+      "sql": "select rowid from schema.archive where status = 'DELETED'",
+      "threads": 10,
+      "commit": 1000,
+      "enabled": true
+    },
+    {
+      "table": "SCHEMA.TEMP_DATA",
+      "threads": 5,
+      "enabled": false
+    }
+  ]
+}
