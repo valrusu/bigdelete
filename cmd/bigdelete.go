@@ -15,6 +15,7 @@ import (
 func main() {
 	var configFile string
 	var parallel int
+	var extractOnly bool
 
 	flag.StringVar(&bigdelete.ConnStr, "connect", "", "")
 	flag.StringVar(&bigdelete.TableName, "table", "", "")
@@ -24,6 +25,7 @@ func main() {
 	flag.StringVar(&bigdelete.Tnsadmin, "tnsadmin", "", "")
 	flag.StringVar(&configFile, "configfile", "bigdelete.json", "")
 	flag.IntVar(&parallel, "parallel", 0, "")
+	flag.BoolVar(&extractOnly, "extractonly", false, "")
 	flag.BoolVar(&bigdelete.DebugFlag, "debug", false, "")
 	flag.Parse()
 
@@ -46,7 +48,7 @@ func main() {
 	if tableSet {
 		perr = bigdelete.BigDelete()
 	} else {
-		perr = bigdelete.RunConfigFile(configFile, parallel)
+		perr = bigdelete.RunConfigFile(configFile, parallel, extractOnly)
 	}
 
 	if perr.Err != nil {
