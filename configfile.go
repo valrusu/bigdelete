@@ -51,10 +51,13 @@ func (t TableConfig) isEnabled() bool {
 	return t.Enabled == nil || *t.Enabled
 }
 
-func RunConfigFile(configFile string, parallel int, extractOnly bool) Progerr {
+func RunConfigFile(configFile string, checkConfig bool, parallel int, extractOnly bool) Progerr {
 	cfg, perr := loadConfigFile(configFile)
 	if perr.Err != nil {
 		return perr
+	}
+	if checkConfig {
+		return Progerr{Code: 0, Msg: "config file checked ok", Err: nil}
 	}
 
 	if extractOnly && cfg.DeleteOnly {
@@ -182,6 +185,8 @@ func runOneTable(db *sql.DB, t TableConfig, rowidDir string, cleanup bool, confi
 	var tmpPath string
 	var perr Progerr
 	var shouldCleanup bool
+
+	log.Println("running table " + t.Table)
 
 	if configDeleteOnly {
 		tmpPath, perr = findRowidFile(rowidDir, t.Table)

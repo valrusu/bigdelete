@@ -6,16 +6,18 @@ package main
 
 import (
 	"flag"
-	_ "github.com/godror/godror"
-	"github.com/valrusu/bigdelete"
 	"log"
 	"os"
+
+	_ "github.com/godror/godror"
+	"github.com/valrusu/bigdelete"
 )
 
 func main() {
 	var configFile string
 	var parallel int
 	var extractOnly bool
+	var checkConfig bool
 
 	flag.StringVar(&bigdelete.ConnStr, "connect", "", "")
 	flag.StringVar(&bigdelete.TableName, "table", "", "")
@@ -24,6 +26,7 @@ func main() {
 	flag.IntVar(&bigdelete.Groupsize, "group", 1, "")
 	flag.StringVar(&bigdelete.Tnsadmin, "tnsadmin", "", "")
 	flag.StringVar(&configFile, "configfile", "bigdelete.json", "")
+	flag.BoolVar(&checkConfig, "checkconfig", false, "only check the config file and exit")
 	flag.IntVar(&parallel, "parallel", 0, "")
 	flag.BoolVar(&extractOnly, "extractonly", false, "")
 	flag.BoolVar(&bigdelete.DebugFlag, "debug", false, "")
@@ -48,7 +51,7 @@ func main() {
 	if tableSet {
 		perr = bigdelete.BigDelete()
 	} else {
-		perr = bigdelete.RunConfigFile(configFile, parallel, extractOnly)
+		perr = bigdelete.RunConfigFile(configFile, checkConfig, parallel, extractOnly)
 	}
 
 	if perr.Err != nil {
