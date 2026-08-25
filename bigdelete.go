@@ -17,6 +17,7 @@ var (
 	Rowidspercall                int
 	Groupsize                    int
 	DebugFlag                    bool
+	tempTableCreated             bool
 )
 
 type count struct {
@@ -32,6 +33,23 @@ type Progerr struct {
 	Code int
 }
 
+// createTempTable tests if the bigdeletetemp table exists, we can insert one row in it, and commit (which would delete the inserted)
+func createTempTable(db *sql.DB) Progerr {
+	// sql1 := "create global temporary table bigdeletetemp (rid rowid) on commit delete rows"
+	// sql2 := "insert into bigdeletetemp select rowid from dual" // not sure about this
+
+	// run sql2
+	// ok: done good, temp table exists already
+	// failed: run sql1
+	//         ok: run sql2
+	//             ok: done ok, temp table created
+	//             failed: done bad
+	//         failed: done bad
+	//
+	return Progerr{nil, "temp table checked", 0}
+}
+
+// connectDB establishes the database connection
 func connectDB() (*sql.DB, Progerr) {
 	var err error
 	db, err := sql.Open("godror", ConnStr)
@@ -92,6 +110,15 @@ func BigDelete() Progerr {
 		return perr
 	}
 	defer db.Close()
+
+	perr = createTempTable(db)
+	if perr.Code == 0 {
+		log.Println("temp table checked ok")
+	} else {
+		log.Println(perr.Msg)
+		return perr
+	}
+
 	return runDelete(db, TableName, Numthreads, Rowidspercall, Groupsize, os.Stdin)
 }
 

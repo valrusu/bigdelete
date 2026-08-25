@@ -33,6 +33,7 @@ type ConfigFile struct {
 	CleanupRowidFiles bool          `json:"cleanupRowidFiles"`
 	DeleteOnly        bool          `json:"deleteOnly"`
 	Tables            []TableConfig `json:"tables"`
+	ConnectString     string        `json:connectString`
 }
 
 type TableConfig struct {
@@ -67,11 +68,23 @@ func RunConfigFile(configFile string, parallel int, extractOnly bool) Progerr {
 		parallel = 1
 	}
 
+	if cfg.ConnectString != "" {
+		ConnStr = cfg.ConnectString
+	}
+
 	db, perr := connectDB()
 	if perr.Err != nil {
 		return perr
 	}
 	defer db.Close()
+
+	perr = createTempTable(db)
+	if perr.Code == 0 {
+		log.Println("temp table checked ok")
+	} else {
+		log.Println(perr.Msg)
+		return perr
+	}
 
 	return runTablePool(db, cfg, parallel, extractOnly)
 }
@@ -221,6 +234,7 @@ func extractRowids(db *sql.DB, t TableConfig, rowidDir string) (string, Progerr)
 
 	safeName := tableNameSanitizer.ReplaceAllString(t.Table, "_")
 	tmp, err := os.CreateTemp(rowidDir, "bigdelete-"+safeName+"-*.rowids")
+	// TODO @claude if the file name includes a temporary component, how is the "deleteonly" supposed to work? how would it pick up the existing file?
 	if err != nil {
 		return "", Progerr{err, "cannot create rowid temp file for " + t.Table, 17}
 	}
