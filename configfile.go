@@ -37,12 +37,32 @@ type ConfigFile struct {
 }
 
 type TableConfig struct {
-	Table   string `json:"table"`
-	SQL     string `json:"sql"`
-	Threads int    `json:"threads"`
-	Commit  int    `json:"commit"`
-	Group   int    `json:"group"`
-	Enabled *bool  `json:"enabled"`
+	Table   string  `json:"table"`
+	SQL     string  `json:"sql"`
+	SQLPre  sqlList `json:"sql-pre"`
+	SQLPost sqlList `json:"sql-post"`
+	Threads int     `json:"threads"`
+	Commit  int     `json:"commit"`
+	Group   int     `json:"group"`
+	Enabled *bool   `json:"enabled"`
+}
+
+// sqlList holds sql-pre / sql-post statements; in JSON it may be a single
+// string or an array of strings.
+type sqlList []string
+
+func (l *sqlList) UnmarshalJSON(data []byte) error {
+	var one string
+	if err := json.Unmarshal(data, &one); err == nil {
+		*l = sqlList{one}
+		return nil
+	}
+	var many []string
+	if err := json.Unmarshal(data, &many); err != nil {
+		return fmt.Errorf("sql-pre/sql-post must be a string or an array of strings")
+	}
+	*l = many
+	return nil
 }
 
 // isEnabled reports whether the table should be processed; a table is enabled
@@ -188,6 +208,10 @@ func runOneTable(db *sql.DB, t TableConfig, rowidDir string, cleanup bool, confi
 
 	log.Println("running table " + t.Table)
 
+	if perr = runTableSQL(db, t.Table, "sql-pre", t.SQLPre, 28); perr.Err != nil {
+		return perr
+	}
+
 	if configDeleteOnly {
 		tmpPath, perr = findRowidFile(rowidDir, t.Table)
 		if perr.Err != nil {
@@ -225,7 +249,31 @@ func runOneTable(db *sql.DB, t TableConfig, rowidDir string, cleanup bool, confi
 	}
 	defer f.Close()
 
-	return runDelete(db, t.Table, t.Threads, t.Commit, t.Group, f)
+	if perr = runDelete(db, t.Table, t.Threads, t.Commit, t.Group, f); perr.Err != nil {
+		return perr
+	}
+
+	return runTableSQL(db, t.Table, "sql-post", t.SQLPost, 29)
+}
+
+// runTableSQL executes a table's optional sql-pre / sql-post statements in
+// order, stopping at the first failure; empty entries are skipped. Plain SQL
+// must not end in ";", PL/SQL blocks must.
+func runTableSQL(db *sql.DB, tableName, kind string, stmts sqlList, code int) Progerr {
+	for i, stmt := range stmts {
+		if strings.TrimSpace(stmt) == "" {
+			continue
+		}
+		label := fmt.Sprintf("%s[%d]", kind, i)
+		log.Println("table", tableName, "running", label)
+		if DebugFlag {
+			log.Println("table", tableName, label+":", stmt)
+		}
+		if _, err := db.Exec(stmt); err != nil {
+			return Progerr{err, label + " failed for " + tableName, code}
+		}
+	}
+	return Progerr{nil, "", 0}
 }
 
 var tableNameSanitizer = regexp.MustCompile(`[^A-Za-z0-9_.]+`)

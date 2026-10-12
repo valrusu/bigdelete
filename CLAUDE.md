@@ -21,13 +21,18 @@ cd cmd && go build -o bigdelete bigdelete.go
 
 **Legacy single-table mode** (ROWIDs piped from stdin):
 ```bash
-<rowid-source> | ./bigdelete -connect <conn-string> -table <target-table> [-threads 20] [-commit 1237] [-group 1] [-tnsadmin <dir>] [-debug]
+<rowid-source> | ./bigdelete -connect <conn-string> -table <target-table> [-threads 20] [-commit 1237] [-group 1] [-tnsadmin <dir>] [-prerun <script>] [-postrun <script>] [-debug]
 ```
 
 **New config-file mode** (multiple tables with automatic ROWID extraction):
 ```bash
-./bigdelete -connect <conn-string> [-configfile bigdelete.json] [-parallel 2] [-extractonly] [-tnsadmin <dir>] [-debug]
+./bigdelete -connect <conn-string> [-configfile bigdelete.json] [-parallel 2] [-extractonly] [-tnsadmin <dir>] [-prerun <script>] [-postrun <script>] [-debug]
 ```
+
+### Pre/post run scripts
+- `-prerun <script>`: executed (directly, no shell, no args) before the run; non-zero exit aborts with code 26.
+- `-postrun <script>`: executed after the run, whether it succeeded or failed (but not if a delete worker `os.Exit`ed). Gets the run's exit code in env `BIGDELETE_EXITCODE`. If the run succeeded and the script fails, exit code is 27; if the run failed, its own code wins.
+- Scripts get stdout/stderr but not stdin (stdin carries ROWIDs in `-table` mode). Neither runs with `-checkconfig`.
 
 The `-table` and `-configfile` flags are mutually exclusive. If neither is passed, `-configfile` defaults to `bigdelete.json`.
 
@@ -49,6 +54,8 @@ The `-table` and `-configfile` flags are mutually exclusive. If neither is passe
       "threads": 20,
       "commit": 1237,
       "group": 50,
+      "sql-pre": "alter trigger schema.table1_trg disable",
+      "sql-post": ["alter trigger schema.table1_trg enable", "alter index schema.idx1 coalesce"],
       "enabled": true
     },
     {
@@ -70,6 +77,9 @@ The `-table` and `-configfile` flags are mutually exclusive. If neither is passe
 **Per-table settings:**
 - Each table's `threads`, `commit`, `group` are optional and default to 20, 1237, and 1 respectively.
 - `enabled` (optional, default `true`): if `false`, skip processing this table.
+- `sql-pre` (optional): a string or an array of strings, each one SQL statement or PL/SQL block, executed in order (stopping at the first failure) before the extract (in delete-only mode: before the delete). Failure skips the table, exit code 28.
+- `sql-post` (optional): same format as `sql-pre`; executed after a successful delete; not run in extract-only mode. Failure exit code 29.
+- Plain SQL must not end with `;` (ORA-00911); PL/SQL blocks (`begin ... end;`) must.
 
 ### Temp table prerequisite
 
@@ -119,6 +129,7 @@ Three-file project; everything else under `vendor/` is dependencies.
 **Extraction errors (13, 16-19, 23-25):** query, scan, file I/O, read directory, file not found, multiple files found.
 **Delete errors (6-8, 10-15):** prepare stmt, transaction, delete, commit (worker goroutine exits).
 **Mode conflicts (21):** `-extractonly` with `deleteOnly` config setting.
+**Pre/post hooks (26-29):** `-prerun` script, `-postrun` script, per-table `sql-pre`, per-table `sql-post`.
 
 ## Error handling and documented limitation
 
