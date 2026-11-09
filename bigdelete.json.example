@@ -1,14 +1,19 @@
 {
-  "parallelSelect": 2,
-  "parallelDelete": 2,
+  "connectString": "user/password@tnsalias",
+  "parallel": 1,
+  "parallelExtract": 2,
   "deleteRowidFiles": "/tmp/bigdelete-rowids",
   "cleanupRowidFiles": false,
+  "purgeRowidFilesOlderThan": "6d3m",
+  "extractOnly": false,
+  "deleteOnly": false,
   "tables": [
     {
       "table": "SCHEMA.OLD_DATA",
       "sql": "select rowid from schema.old_data where year < 2020",
       "sql-pre": "alter trigger schema.old_data_trg disable",
       "sql-post": [
+        "alter trigger schema.old_data_trg enable",
         "alter index schema.old_data_idx1 coalesce",
         "alter index schema.old_data_idx2 rebuild online",
         "begin dbms_stats.gather_table_stats('SCHEMA', 'OLD_DATA'); end;"

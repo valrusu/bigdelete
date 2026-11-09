@@ -35,7 +35,13 @@ func main() {
 	flag.BoolVar(&bigdelete.DebugFlag, "debug", false, "")
 	flag.StringVar(&prerun, "prerun", "", "script to run before the run; a failure aborts the run")
 	flag.StringVar(&postrun, "postrun", "", "script to run after the run; gets the run's exit code in BIGDELETE_EXITCODE")
+	exampleConfig := flag.Bool("exampleconfig", false, "print an example config file and exit")
 	flag.Parse()
+
+	if *exampleConfig {
+		fmt.Print(bigdelete.ExampleConfig)
+		return
+	}
 
 	var tableSet, configSet bool
 	flag.Visit(func(f *flag.Flag) {

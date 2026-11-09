@@ -19,10 +19,14 @@ fi
 
 if [[ "$(grep VERSION= /etc/os-release | head -n 1 | cut -f 2 -d "=" | tr -d '"')" == "7.9" ]] ; then
     rm -f bigdelete_oel7
+    echo OEL7; sleep 2
     go build -o bigdelete_oel7 bigdelete.go
+    ./bigdelete_oel7 -h
 elif [[ "$(grep VERSION= /etc/os-release | head -n 1 | cut -f 2 -d "=" | tr -d '"')" == "9.8" ]] ; then
     rm -f bigdelete_oel9
     go build -o bigdelete_oel9 bigdelete.go
+    echo OEL9; sleep 2
+    ./bigdelete_oel7 -h
 else
     # godror embeds ODPI-C, so CGO (a C compiler) is required at build time;
     # without one, go silently sets CGO_ENABLED=0 and the build fails with

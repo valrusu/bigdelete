@@ -3,16 +3,24 @@ package bigdelete
 import (
 	"bufio"
 	"database/sql"
+	_ "embed"
 	"encoding/json"
 	"fmt"
-	"io/fs"
 	"log"
+	"math"
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
+
+// ExampleConfig is bigdelete.json.example, built into the binary for -exampleconfig.
+//
+//go:embed bigdelete.json.example
+var ExampleConfig string
 
 const (
 	defaultThreads = 20
@@ -28,12 +36,23 @@ func getTempDir() string {
 }
 
 type ConfigFile struct {
-	Parallel          int           `json:"parallel"`
-	DeleteRowidFiles  string        `json:"deleteRowidFiles"`
-	CleanupRowidFiles bool          `json:"cleanupRowidFiles"`
-	DeleteOnly        bool          `json:"deleteOnly"`
-	Tables            []TableConfig `json:"tables"`
-	ConnectString     string        `json:connectString`
+	// Parallel is the default for ParallelExtract
+	Parallel int `json:"parallel"`
+	// ParallelExtract is how many tables extract their ROWIDs at the same time;
+	// deletes always run one table at a time
+	ParallelExtract   int    `json:"parallelExtract"`
+	DeleteRowidFiles  string `json:"deleteRowidFiles"`
+	CleanupRowidFiles bool   `json:"cleanupRowidFiles"`
+	// PurgeRowidFilesOlderThan is an age like "5d", "78m" or "6d3m"; empty means never purge
+	PurgeRowidFilesOlderThan string `json:"purgeRowidFilesOlderThan"`
+	DeleteOnly               bool   `json:"deleteOnly"`
+	// ExtractOnly does the same as the -extractonly flag
+	ExtractOnly bool          `json:"extractOnly"`
+	Tables      []TableConfig `json:"tables"`
+	// ConnectString is used only when -connect is not given
+	ConnectString string `json:"connectString"`
+
+	purgeAge time.Duration
 }
 
 type TableConfig struct {
@@ -83,15 +102,17 @@ func RunConfigFile(configFile string, checkConfig bool, parallel int, extractOnl
 	if extractOnly && cfg.DeleteOnly {
 		return Progerr{fmt.Errorf("cannot use -extractonly with deleteOnly setting"), "cannot use -extractonly with deleteOnly setting", 21}
 	}
+	// extract-only is on when either the -extractonly flag or the config setting asks for it
+	extractOnly = extractOnly || cfg.ExtractOnly
 
-	if parallel <= 0 {
-		parallel = cfg.Parallel
+	// -parallel overrides parallelExtract
+	extractPar := cfg.ParallelExtract
+	if parallel > 0 {
+		extractPar = parallel
 	}
-	if parallel < 1 {
-		parallel = 1
-	}
+	extractPar = max(extractPar, 1)
 
-	if cfg.ConnectString != "" {
+	if ConnStr == "" {
 		ConnStr = cfg.ConnectString
 	}
 
@@ -101,6 +122,12 @@ func RunConfigFile(configFile string, checkConfig bool, parallel int, extractOnl
 	}
 	defer db.Close()
 
+	dbID, perr := getDBIdent(db)
+	if perr.Err != nil {
+		return perr
+	}
+	log.Println("database", dbID.tag, "schema", dbID.schema)
+
 	perr = createTempTable(db)
 	if perr.Code == 0 {
 		log.Println("temp table checked ok")
@@ -109,7 +136,58 @@ func RunConfigFile(configFile string, checkConfig bool, parallel int, extractOnl
 		return perr
 	}
 
-	return runTablePool(db, cfg, parallel, extractOnly)
+	if cfg.purgeAge > 0 {
+		if cfg.DeleteOnly {
+			log.Println("purgeRowidFilesOlderThan ignored in delete-only mode")
+		} else if perr = purgeRowidFiles(cfg.DeleteRowidFiles, cfg.purgeAge); perr.Err != nil {
+			return perr
+		}
+	}
+
+	log.Println("extracting up to", extractPar, "table(s) at a time; deletes run one table at a time after all extracts")
+	return runTablePool(db, dbID, cfg, extractPar, extractOnly)
+}
+
+// dbIdent identifies the database a run is connected to, so that runs against
+// different databases that have tables with the same name use different rowid
+// files.
+type dbIdent struct {
+	tag    string // db_unique_name, plus the PDB name when connected to one
+	schema string // current_schema, used to qualify unqualified table names
+}
+
+// getDBIdent asks the database who it is instead of parsing the connect
+// string: the connect string can have many formats and holds the password, and
+// two aliases for the same database correctly give the same tag.
+func getDBIdent(db *sql.DB) (dbIdent, Progerr) {
+	var id dbIdent
+	var dbName, conName string
+
+	err := db.QueryRow(`select sys_context('userenv','db_unique_name'), sys_context('userenv','current_schema') from dual`).Scan(&dbName, &id.schema)
+	if err != nil {
+		return id, Progerr{err, "cannot get database name", 3}
+	}
+
+	// con_name does not exist before 12c; there the database name alone is enough
+	if err := db.QueryRow(`select sys_context('userenv','con_name') from dual`).Scan(&conName); err == nil &&
+		conName != "" && !strings.EqualFold(conName, "CDB$ROOT") && !strings.EqualFold(conName, dbName) {
+		dbName += "_" + conName
+	}
+
+	id.tag = strings.ToUpper(tableNameSanitizer.ReplaceAllString(dbName, "_"))
+	id.schema = strings.ToUpper(id.schema)
+	return id, Progerr{nil, "", 0}
+}
+
+// rowidFileName returns the rowid file name for a table, which is the same on
+// every run: bigdelete-<DB>-<SCHEMA.TABLE>.rowids. purgeRowidFiles relies on
+// the bigdelete-*.rowids shape.
+func (id dbIdent) rowidFileName(table string) string {
+	table = strings.ToUpper(strings.TrimSpace(table))
+	if !strings.Contains(table, ".") {
+		table = id.schema + "." + table
+	}
+	return "bigdelete-" + id.tag + "-" + tableNameSanitizer.ReplaceAllString(table, "_") + ".rowids"
 }
 
 func loadConfigFile(path string) (ConfigFile, Progerr) {
@@ -125,8 +203,15 @@ func loadConfigFile(path string) (ConfigFile, Progerr) {
 		return cfg, Progerr{err, "cannot parse config file " + path, 5}
 	}
 
+	if cfg.ExtractOnly && cfg.DeleteOnly {
+		return cfg, Progerr{fmt.Errorf("extractOnly and deleteOnly are both true"), "cannot use extractOnly with deleteOnly setting", 21}
+	}
+
 	if cfg.Parallel == 0 {
 		cfg.Parallel = 1
+	}
+	if cfg.ParallelExtract == 0 {
+		cfg.ParallelExtract = cfg.Parallel
 	}
 
 	if strings.TrimSpace(cfg.DeleteRowidFiles) == "" {
@@ -137,9 +222,27 @@ func loadConfigFile(path string) (ConfigFile, Progerr) {
 		return cfg, Progerr{err, "cannot create rowid directory " + cfg.DeleteRowidFiles, 22}
 	}
 
+	if cfg.PurgeRowidFilesOlderThan != "" {
+		age, err := parseFileAge(cfg.PurgeRowidFilesOlderThan)
+		if err != nil {
+			return cfg, Progerr{err, "invalid purgeRowidFilesOlderThan: " + err.Error(), 9}
+		}
+		cfg.purgeAge = age
+	}
+
+	// each table has one rowid file, so an enabled table may appear only once
+	seen := map[string]int{}
 	for i, t := range cfg.Tables {
 		if strings.TrimSpace(t.Table) == "" {
 			return cfg, Progerr{fmt.Errorf("tables[%d]: missing \"table\"", i), fmt.Sprintf("tables[%d]: missing \"table\"", i), 9}
+		}
+		if t.isEnabled() {
+			key := strings.ToUpper(strings.TrimSpace(t.Table))
+			if j, dup := seen[key]; dup {
+				msg := fmt.Sprintf("tables[%d] and tables[%d] are both enabled for table %s", j, i, t.Table)
+				return cfg, Progerr{fmt.Errorf("%s", msg), msg, 9}
+			}
+			seen[key] = i
 		}
 		if t.isEnabled() && !cfg.DeleteOnly && strings.TrimSpace(t.SQL) == "" {
 			return cfg, Progerr{fmt.Errorf("tables[%d]: missing \"sql\"", i), fmt.Sprintf("tables[%d]: missing \"sql\"", i), 9}
@@ -161,99 +264,194 @@ func loadConfigFile(path string) (ConfigFile, Progerr) {
 	return cfg, Progerr{nil, "", 0}
 }
 
-func runTablePool(db *sql.DB, cfg ConfigFile, parallel int, extractOnly bool) Progerr {
-	work := make(chan TableConfig)
-	errs := make(chan Progerr, len(cfg.Tables))
-	var wg sync.WaitGroup
+var fileAgeFormat = regexp.MustCompile(`^(?:(\d+)d)?(?:(\d+)m)?$`)
 
-	wg.Add(parallel)
-	for w := 0; w < parallel; w++ {
+// parseFileAge parses an age given in days and/or minutes, like "5d", "78m" or
+// "6d3m". A zero age is rejected because it would purge every rowid file.
+func parseFileAge(s string) (time.Duration, error) {
+	parts := fileAgeFormat.FindStringSubmatch(s)
+	if parts == nil || s == "" {
+		return 0, fmt.Errorf("%q is not an age like 5d, 78m or 6d3m", s)
+	}
+
+	var values [2]int64
+	for i, part := range parts[1:] {
+		if part == "" {
+			continue
+		}
+		v, err := strconv.ParseInt(part, 10, 32)
+		if err != nil {
+			return 0, fmt.Errorf("%q is too large", s)
+		}
+		values[i] = v
+	}
+
+	minutes := values[0]*24*60 + values[1]
+	if minutes == 0 {
+		return 0, fmt.Errorf("%q must be greater than zero", s)
+	}
+	if minutes > math.MaxInt64/int64(time.Minute) {
+		return 0, fmt.Errorf("%q is too large", s)
+	}
+	return time.Duration(minutes) * time.Minute, nil
+}
+
+// purgeRowidFiles removes rowid files older than maxAge from rowidDir, whichever
+// table they belong to. Only regular files named like extractRowids names them
+// are touched. A file that cannot be removed is logged but does not stop the run.
+func purgeRowidFiles(rowidDir string, maxAge time.Duration) Progerr {
+	entries, err := os.ReadDir(rowidDir)
+	if err != nil {
+		return Progerr{err, "cannot read rowid directory " + rowidDir, 23}
+	}
+
+	cutoff := time.Now().Add(-maxAge)
+	for _, entry := range entries {
+		if matched, _ := filepath.Match("bigdelete-*.rowids", entry.Name()); !matched || !entry.Type().IsRegular() {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil || !info.ModTime().Before(cutoff) {
+			continue
+		}
+		path := filepath.Join(rowidDir, entry.Name())
+		if err := os.Remove(path); err != nil {
+			log.Println("cannot purge old rowid file", path, err)
+			continue
+		}
+		log.Println("purged old rowid file", path)
+	}
+	return Progerr{nil, "", 0}
+}
+
+// runTablePool runs the enabled tables in two phases:
+//
+//  1. Extract: up to extractPar tables at a time run sql-pre and extract their
+//     ROWIDs (in delete-only mode: only check the rowid file exists).
+//  2. Delete: only after every extract has finished, and only if all of them
+//     worked, the tables are deleted one at a time in config order, each with
+//     its own threads, followed by its sql-post.
+//
+// A failed extract means no delete runs at all, because the tables of one
+// config are usually meant to be deleted together. A failed delete stage
+// (other than the worker os.Exit) is reported and the next table goes on.
+func runTablePool(db *sql.DB, dbID dbIdent, cfg ConfigFile, extractPar int, extractOnly bool) Progerr {
+	var tables []TableConfig
+	for _, t := range cfg.Tables {
+		if t.isEnabled() {
+			tables = append(tables, t)
+		}
+	}
+	paths := make([]string, len(tables))
+	for i, t := range tables {
+		paths[i] = filepath.Join(cfg.DeleteRowidFiles, dbID.rowidFileName(t.Table))
+	}
+
+	// phase 1: extracts; each worker writes only its own table's slot
+	extractErrs := make([]Progerr, len(tables))
+	work := make(chan int)
+	var wg sync.WaitGroup
+	wg.Add(extractPar)
+	for w := 0; w < extractPar; w++ {
 		go func() {
 			defer wg.Done()
-			for t := range work {
-				if !t.isEnabled() {
-					continue
-				}
-				if perr := runOneTable(db, t, cfg.DeleteRowidFiles, cfg.CleanupRowidFiles, cfg.DeleteOnly, extractOnly); perr.Err != nil {
-					errs <- perr
-				}
+			for i := range work {
+				extractErrs[i] = extractTable(db, tables[i], paths[i], cfg.DeleteOnly)
 			}
 		}()
 	}
-
-	for _, t := range cfg.Tables {
-		work <- t
+	for i := range tables {
+		work <- i
 	}
 	close(work)
 	wg.Wait()
-	close(errs)
+
+	var errs []Progerr
+	for _, perr := range extractErrs {
+		if perr.Err != nil {
+			errs = append(errs, perr)
+		}
+	}
+
+	// phase 2: deletes, one table at a time, in config order
+	switch {
+	case extractOnly:
+	case len(errs) > 0:
+		log.Println("extract failed for", len(errs), "of", len(tables), "table(s); no deletes run")
+	default:
+		// a failed delete stops the run, so no later table is deleted; a failed
+		// sql-post is only reported, because that table's rows are already gone
+		for i, t := range tables {
+			if perr := deleteTable(db, t, paths[i], cfg.CleanupRowidFiles && !cfg.DeleteOnly); perr.Err != nil {
+				errs = append(errs, perr)
+				var rest []string
+				for _, r := range tables[i+1:] {
+					rest = append(rest, r.Table)
+				}
+				if len(rest) > 0 {
+					log.Println("delete failed for", t.Table, "; not deleted:", strings.Join(rest, ", "))
+				}
+				break
+			}
+			if perr := runTableSQL(db, t.Table, "sql-post", t.SQLPost, 29); perr.Err != nil {
+				log.Printf("%s: %v; continuing with the next table", perr.Msg, perr.Err)
+				errs = append(errs, perr)
+			}
+		}
+	}
 
 	var msgs []string
 	code := 0
-	for perr := range errs {
+	for _, perr := range errs {
 		log.Printf("table run failed: %s: %v", perr.Msg, perr.Err)
 		msgs = append(msgs, fmt.Sprintf("%s: %v", perr.Msg, perr.Err))
 		code = perr.Code
 	}
 	if len(msgs) > 0 {
-		return Progerr{fmt.Errorf("%d of %d table(s) failed", len(msgs), len(cfg.Tables)), strings.Join(msgs, "; "), code}
+		return Progerr{fmt.Errorf("%d of %d table(s) failed", len(msgs), len(tables)), strings.Join(msgs, "; "), code}
 	}
 	return Progerr{nil, "", 0}
 }
 
-func runOneTable(db *sql.DB, t TableConfig, rowidDir string, cleanup bool, configDeleteOnly bool, extractOnly bool) Progerr {
-	var tmpPath string
-	var perr Progerr
-	var shouldCleanup bool
-
+// extractTable is a table's extract phase: sql-pre, then the ROWID extract, or
+// in delete-only mode a check that the rowid file from an earlier extract exists.
+func extractTable(db *sql.DB, t TableConfig, rowidPath string, deleteOnly bool) Progerr {
 	log.Println("running table " + t.Table)
 
-	if perr = runTableSQL(db, t.Table, "sql-pre", t.SQLPre, 28); perr.Err != nil {
+	if perr := runTableSQL(db, t.Table, "sql-pre", t.SQLPre, 28); perr.Err != nil {
 		return perr
 	}
-
-	if configDeleteOnly {
-		tmpPath, perr = findRowidFile(rowidDir, t.Table)
-		if perr.Err != nil {
-			return perr
-		}
-		shouldCleanup = false
-	} else {
-		tmpPath, perr = extractRowids(db, t, rowidDir)
-		if perr.Err != nil {
-			return perr
-		}
-		if extractOnly {
-			if DebugFlag {
-				log.Println("table", t.Table, "extracted rowids to", tmpPath)
-			}
-			return Progerr{nil, "", 0}
-		}
-		shouldCleanup = cleanup
+	if deleteOnly {
+		return checkRowidFile(rowidPath, t.Table)
 	}
+	return extractRowids(db, t, rowidPath)
+}
 
-	defer func() {
-		if shouldCleanup {
-			if DebugFlag {
-				log.Println("table", t.Table, "removing rowid file", tmpPath)
-			}
-			os.Remove(tmpPath)
-		} else if DebugFlag {
-			log.Println("table", t.Table, "keeping rowid file", tmpPath)
-		}
-	}()
+// deleteTable deletes the ROWIDs in rowidPath from the table (sql-post is run
+// by the caller). With cleanup the rowid file is removed, but only after a
+// successful delete, so a failed one can be rerun in delete-only mode.
+func deleteTable(db *sql.DB, t TableConfig, rowidPath string, cleanup bool) Progerr {
+	log.Println("deleting from table " + t.Table)
 
-	f, err := os.Open(tmpPath)
+	f, err := os.Open(rowidPath)
 	if err != nil {
 		return Progerr{err, "cannot open rowid file for " + t.Table, 17}
 	}
-	defer f.Close()
-
-	if perr = runDelete(db, t.Table, t.Threads, t.Commit, t.Group, f); perr.Err != nil {
+	perr := runDelete(db, t.Table, t.Threads, t.Commit, t.Group, f)
+	f.Close()
+	if perr.Err != nil {
 		return perr
 	}
 
-	return runTableSQL(db, t.Table, "sql-post", t.SQLPost, 29)
+	if cleanup {
+		if DebugFlag {
+			log.Println("table", t.Table, "removing rowid file", rowidPath)
+		}
+		os.Remove(rowidPath)
+	} else if DebugFlag {
+		log.Println("table", t.Table, "keeping rowid file", rowidPath)
+	}
+	return Progerr{nil, "", 0}
 }
 
 // runTableSQL executes a table's optional sql-pre / sql-post statements in
@@ -278,79 +476,72 @@ func runTableSQL(db *sql.DB, tableName, kind string, stmts sqlList, code int) Pr
 
 var tableNameSanitizer = regexp.MustCompile(`[^A-Za-z0-9_.]+`)
 
-func extractRowids(db *sql.DB, t TableConfig, rowidDir string) (string, Progerr) {
+// extractRowids runs the table's ROWID SQL and writes the result to rowidPath,
+// replacing any file from an earlier run. The rows go to a temporary file in
+// the same directory first, renamed at the end, so a failed or interrupted
+// extract never leaves a partial file under the real name. The temporary name
+// ends in .tmp, so purgeRowidFiles leaves it alone.
+func extractRowids(db *sql.DB, t TableConfig, rowidPath string) Progerr {
 	rows, err := db.Query(t.SQL)
 	if err != nil {
-		return "", Progerr{err, "rowid extraction query failed for " + t.Table, 13}
+		return Progerr{err, "rowid extraction query failed for " + t.Table, 13}
 	}
 	defer rows.Close()
 
-	safeName := tableNameSanitizer.ReplaceAllString(t.Table, "_")
-	tmp, err := os.CreateTemp(rowidDir, "bigdelete-"+safeName+"-*.rowids")
-	// TODO @claude if the file name includes a temporary component, how is the "deleteonly" supposed to work? how would it pick up the existing file?
+	tmp, err := os.CreateTemp(filepath.Dir(rowidPath), filepath.Base(rowidPath)+".*.tmp")
 	if err != nil {
-		return "", Progerr{err, "cannot create rowid temp file for " + t.Table, 17}
+		return Progerr{err, "cannot create rowid temp file for " + t.Table, 17}
 	}
 	tmpPath := tmp.Name()
-	w := bufio.NewWriter(tmp)
+	fail := func(err error, msg string, code int) Progerr {
+		tmp.Close()
+		os.Remove(tmpPath)
+		return Progerr{err, msg + " for " + t.Table, code}
+	}
 
+	w := bufio.NewWriter(tmp)
 	var rid string
+	var n int
 	for rows.Next() {
 		if err := rows.Scan(&rid); err != nil {
-			tmp.Close()
-			os.Remove(tmpPath)
-			return "", Progerr{err, "rowid scan failed for " + t.Table, 16}
+			return fail(err, "rowid scan failed", 16)
 		}
 		if _, err := w.WriteString(rid + "\n"); err != nil {
-			tmp.Close()
-			os.Remove(tmpPath)
-			return "", Progerr{err, "cannot write rowid temp file for " + t.Table, 18}
+			return fail(err, "cannot write rowid temp file", 18)
 		}
+		n++
 	}
-
 	if err := rows.Err(); err != nil {
-		tmp.Close()
-		os.Remove(tmpPath)
-		return "", Progerr{err, "rowid extraction failed for " + t.Table, 19}
+		return fail(err, "rowid extraction failed", 19)
 	}
-
 	if err := w.Flush(); err != nil {
-		tmp.Close()
-		os.Remove(tmpPath)
-		return "", Progerr{err, "cannot flush rowid temp file for " + t.Table, 18}
+		return fail(err, "cannot flush rowid temp file", 18)
 	}
-
 	if err := tmp.Close(); err != nil {
 		os.Remove(tmpPath)
-		return "", Progerr{err, "cannot close rowid temp file for " + t.Table, 18}
+		return Progerr{err, "cannot close rowid temp file for " + t.Table, 18}
+	}
+	if err := os.Rename(tmpPath, rowidPath); err != nil {
+		os.Remove(tmpPath)
+		return Progerr{err, "cannot rename rowid temp file to " + rowidPath, 18}
 	}
 
-	return tmpPath, Progerr{nil, "", 0}
+	log.Println("table", t.Table, "extracted", n, "rowids to", rowidPath)
+	return Progerr{nil, "", 0}
 }
 
-func findRowidFile(rowidDir string, tableName string) (string, Progerr) {
-	safeName := tableNameSanitizer.ReplaceAllString(tableName, "_")
-	pattern := "bigdelete-" + safeName + "-*.rowids"
-
-	entries, err := os.ReadDir(rowidDir)
+// checkRowidFile checks, in delete-only mode, that the table's rowid file
+// from an earlier extract exists.
+func checkRowidFile(rowidPath string, tableName string) Progerr {
+	info, err := os.Stat(rowidPath)
+	if os.IsNotExist(err) {
+		return Progerr{err, "no rowid file " + rowidPath + " for " + tableName, 24}
+	}
 	if err != nil {
-		return "", Progerr{err, "cannot read rowid directory for " + tableName, 23}
+		return Progerr{err, "cannot check rowid file " + rowidPath + " for " + tableName, 23}
 	}
-
-	var matches []fs.DirEntry
-	for _, entry := range entries {
-		if matched, _ := filepath.Match(pattern, entry.Name()); matched {
-			matches = append(matches, entry)
-		}
+	if !info.Mode().IsRegular() {
+		return Progerr{fmt.Errorf("%s is not a regular file", rowidPath), "rowid file " + rowidPath + " for " + tableName + " is not a regular file", 24}
 	}
-
-	if len(matches) == 0 {
-		return "", Progerr{fmt.Errorf("no rowid file found for " + tableName), "no rowid file found for " + tableName + " in " + rowidDir, 24}
-	}
-
-	if len(matches) > 1 {
-		return "", Progerr{fmt.Errorf("multiple rowid files found for " + tableName), fmt.Sprintf("multiple rowid files found for %s in %s; use -extractonly to regenerate", tableName, rowidDir), 25}
-	}
-
-	return filepath.Join(rowidDir, matches[0].Name()), Progerr{nil, "", 0}
+	return Progerr{nil, "", 0}
 }

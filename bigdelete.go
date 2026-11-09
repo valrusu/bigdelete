@@ -33,7 +33,7 @@ type Progerr struct {
 	Code int
 }
 
-// createTempTable tests if the bigdeletetemp table exists, we can insert one row in it, and commit (which would delete the inserted)
+// createTempTable tests if the bigdeletetemp table exists, we can insert one row in it, and commit (which would delete the inserted row)
 func createTempTable(db *sql.DB) Progerr {
 	// sql1 := "create global temporary table bigdeletetemp (rid rowid) on commit delete rows"
 	// sql2 := "insert into bigdeletetemp select rowid from dual" // not sure about this
